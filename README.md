@@ -48,13 +48,13 @@ Many everyday PDF tasks—combining signed pages, extracting an appendix, conver
 - **PDF Processing Engine:** [`pdf-lib`](https://pdf-lib.js.org/) (100% client-side JavaScript PDF manipulation)
 - **Styling & Design System:** Tailwind CSS (Warm Alabaster Paper & Terracotta editorial theme)
 - **Icons:** Lucide React
-- **Build & Test Tooling:** Vite 5, Vitest, React Testing Library, ESLint
+- **Build & Test Tooling:** Vite 6, Vitest 4, React Testing Library, ESLint
 
 ---
 
 ## Requirements & Installation
 
-- **Node.js:** v18.18+ or v20+
+- **Node.js:** v20+ LTS recommended (v18.18+ supported for build/runtime)
 - **npm:** v9+
 
 ```bash
@@ -131,7 +131,7 @@ paperflow/
 ## Security & Privacy Considerations
 
 - **No Network Transmission:** All document parsing and generation happen inside browser memory (`Uint8Array`). No files are uploaded to any backend server.
-- **Metadata Stripping Scope & Limitations:** Clicking **Strip All Metadata & Download** removes the PDF Document Information Dictionary (`/Info` fields: `Title`, `Author`, `Subject`, `Keywords`, `Creator`, `Producer`, `CreationDate`, `ModDate`, and custom `/Info` keys) as well as document-level and page-level `/Metadata` (XMP XML packet) and `/PieceInfo` streams while preserving valid PDF structure. It does **not** redact visible or hidden text inside page content streams, embedded font names, interactive form field values, annotations, or EXIF bytes inside embedded raster images.
+- **Metadata Stripping Scope & Limitations:** Clicking **Strip All Metadata & Download** removes the PDF Document Information Dictionary (`/Info` fields: `Title`, `Author`, `Subject`, `Keywords`, `Creator`, `Producer`, `CreationDate`, `ModDate`, and custom `/Info` keys) as well as document-level, page-level, and component-level `/Metadata` (XMP XML packet) and `/PieceInfo` streams while preserving valid PDF structure. It does **not** redact visible or hidden text inside page content streams, embedded font names, interactive form field values, annotations, or EXIF bytes inside embedded raster images.
 
 ---
 

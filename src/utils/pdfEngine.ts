@@ -3,6 +3,7 @@ import {
   PDFName,
   PDFRef,
   PDFDict,
+  PDFObject,
   StandardFonts,
   rgb,
   degrees,
@@ -105,9 +106,63 @@ export function parsePageRanges(rangeInput: string, maxPages: number): number[] 
 }
 
 /**
+ * Validates that a byte buffer contains a valid PDF header (%PDF-) and is non-empty.
+ */
+function validatePdfBytes(buffer: Uint8Array): void {
+  if (!buffer || !ArrayBuffer.isView(buffer) || buffer.byteLength < 8) {
+    throw new Error('Invalid or empty PDF file: buffer is too small to be a valid PDF document.');
+  }
+  const headerSlice = buffer.subarray(0, Math.min(buffer.byteLength, 1024));
+  const headerText = new TextDecoder('latin1').decode(headerSlice);
+  if (!headerText.includes('%PDF-')) {
+    throw new Error('Unsupported or corrupted file: missing %PDF- document header.');
+  }
+}
+
+/**
+ * Safely extracts the PDFDict from a PDFObject (either a PDFDict directly or a PDFStream carrying .dict).
+ */
+function extractObjectDict(obj: PDFObject | undefined): PDFDict | null {
+  if (!obj) return null;
+  if (obj instanceof PDFDict) return obj;
+  if ('dict' in obj && (obj as { dict?: unknown }).dict instanceof PDFDict) {
+    return (obj as { dict: PDFDict }).dict;
+  }
+  return null;
+}
+
+/**
+ * Detects whether a PDFDocument contains XMP /Metadata streams at the catalog, page, or component level.
+ */
+function detectXmpMetadata(doc: PDFDocument): boolean {
+  const metadataName = PDFName.of('Metadata');
+  const xmlName = PDFName.of('XML');
+  const typeName = PDFName.of('Type');
+  const subtypeName = PDFName.of('Subtype');
+
+  if (doc.catalog.get(metadataName)) return true;
+
+  for (const page of doc.getPages()) {
+    if (page.node.get(metadataName)) return true;
+  }
+
+  for (const [, obj] of doc.context.enumerateIndirectObjects()) {
+    const dict = extractObjectDict(obj);
+    if (!dict) continue;
+    if (dict.get(metadataName)) return true;
+    if (dict.get(typeName) === metadataName || dict.get(subtypeName) === xmlName) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/**
  * Inspects a PDF buffer and returns metadata and per-page dimensions/rotations.
  */
 export async function inspectPdfBuffer(buffer: Uint8Array): Promise<PdfMetadataInfo> {
+  validatePdfBytes(buffer);
   const doc = await PDFDocument.load(buffer, { updateMetadata: false });
   const pageCount = doc.getPageCount();
   const pages: PageConfig[] = [];
@@ -127,7 +182,7 @@ export async function inspectPdfBuffer(buffer: Uint8Array): Promise<PdfMetadataI
 
   const creationDate = doc.getCreationDate();
   const modDate = doc.getModificationDate();
-  const hasXmpMetadata = Boolean(doc.catalog.get(PDFName.of('Metadata')));
+  const hasXmpMetadata = detectXmpMetadata(doc);
 
   return {
     pageCount,
@@ -154,6 +209,7 @@ export async function mergePdfBuffers(buffers: Uint8Array[]): Promise<Uint8Array
 
   const mergedPdf = await PDFDocument.create();
   for (const buf of buffers) {
+    validatePdfBytes(buf);
     const sourcePdf = await PDFDocument.load(buf);
     const copiedPages = await mergedPdf.copyPages(sourcePdf, sourcePdf.getPageIndices());
     for (const page of copiedPages) {
@@ -172,6 +228,7 @@ export async function organizePdfPages(
   sourceBuffer: Uint8Array,
   pageConfigs: PageConfig[]
 ): Promise<Uint8Array> {
+  validatePdfBytes(sourceBuffer);
   const activeConfigs = pageConfigs.filter((c) => c.included);
   if (activeConfigs.length === 0) {
     throw new Error('At least one page must remain included to build a PDF.');
@@ -195,16 +252,18 @@ export async function organizePdfPages(
 }
 
 /**
- * Sanitizes standard PDF document metadata and XMP/PieceInfo catalog streams.
+ * Sanitizes standard PDF document metadata and XMP/PieceInfo streams across catalog, page, and object levels.
  *
  * Scope & Limitations:
  * - Removes all keys from the PDF Document Information Dictionary (/Info), including
- *   Title, Author, Subject, Keywords, Creator, Producer, CreationDate, ModDate, and custom keys.
- * - Removes document-level and page-level /Metadata (XMP XML streams) and /PieceInfo dictionaries.
+ *   Title, Author, Subject, Keywords, Creator, Producer, CreationDate, ModDate, and custom keys,
+ *   and detaches the /Info reference from the trailer.
+ * - Removes document-level, page-level, and component-level /Metadata (XMP XML streams) and /PieceInfo dictionaries.
  * - Preserves page content streams, fonts, images, form fields, and document structure intact.
- *   Note: Identifying text or EXIF tags embedded inside page content or raster images are not modified.
+ *   Note: Identifying text or EXIF tags embedded inside page content streams or raster images are not modified.
  */
 export async function stripPdfMetadata(sourceBuffer: Uint8Array): Promise<Uint8Array> {
+  validatePdfBytes(sourceBuffer);
   const doc = await PDFDocument.load(sourceBuffer, { updateMetadata: false });
 
   // 1. Clear and detach the Document Information Dictionary (/Info)
@@ -223,8 +282,8 @@ export async function stripPdfMetadata(sourceBuffer: Uint8Array): Promise<Uint8A
   }
 
   // 2. Remove catalog-level /Metadata (XMP packet) and /PieceInfo dictionaries
-  const catalogKeysToRemove = ['Metadata', 'PieceInfo'];
-  for (const keyName of catalogKeysToRemove) {
+  const keysToRemove = ['Metadata', 'PieceInfo'];
+  for (const keyName of keysToRemove) {
     const pdfName = PDFName.of(keyName);
     const ref = doc.catalog.get(pdfName);
     if (ref instanceof PDFRef) {
@@ -235,13 +294,40 @@ export async function stripPdfMetadata(sourceBuffer: Uint8Array): Promise<Uint8A
 
   // 3. Remove page-level /Metadata and /PieceInfo entries
   for (const page of doc.getPages()) {
-    for (const keyName of catalogKeysToRemove) {
+    for (const keyName of keysToRemove) {
       const pdfName = PDFName.of(keyName);
       const ref = page.node.get(pdfName);
       if (ref instanceof PDFRef) {
         doc.context.delete(ref);
       }
       page.node.delete(pdfName);
+    }
+  }
+
+  // 4. Remove component-level /Metadata, /PieceInfo, and standalone XMP stream objects
+  const metadataName = PDFName.of('Metadata');
+  const pieceInfoName = PDFName.of('PieceInfo');
+  const typeName = PDFName.of('Type');
+  const subtypeName = PDFName.of('Subtype');
+  const xmlName = PDFName.of('XML');
+
+  for (const [ref, obj] of doc.context.enumerateIndirectObjects()) {
+    const dict = extractObjectDict(obj);
+    if (!dict) continue;
+
+    if (dict.get(typeName) === metadataName || dict.get(subtypeName) === xmlName) {
+      doc.context.delete(ref);
+      continue;
+    }
+
+    for (const targetKey of [metadataName, pieceInfoName]) {
+      if (dict.has(targetKey)) {
+        const nestedRef = dict.get(targetKey);
+        if (nestedRef instanceof PDFRef) {
+          doc.context.delete(nestedRef);
+        }
+        dict.delete(targetKey);
+      }
     }
   }
 
