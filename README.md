@@ -22,7 +22,7 @@ Many everyday PDF tasks—combining signed pages, extracting an appendix, conver
 - **PDF Merge Queue:** Combine two or more PDF files in any custom sequence while preserving original page dimensions, fonts, and vector graphics.
 - **Page Split, Extract & Reorder Studio:** Filter pages using range expressions (e.g., `1-3, 5`), toggle individual sheets on or off, rotate pages in 90° increments, and reorder pages before exporting.
 - **Images to PDF Compiler:** Convert PNG and JPEG images into multi-page PDF documents with selectable page presets (`A4`, `US Letter`, or `Fit Exact Image Dimensions`), portrait/landscape orientation, and adjustable page margins.
-- **Document Inspector & Metadata Sanitizer:** Audit exact file byte size, page counts, sheet geometry, creation/modification timestamps, and edit or strip identifying PDF metadata headers (`Title`, `Author`, `Subject`, `Creator`).
+- **Document Inspector & Metadata Sanitizer:** Audit exact file byte size, page counts, sheet geometry, creation/modification timestamps, keywords, and XMP stream presence, or strip document-level `/Info` dictionary fields and catalog/page `/Metadata` (XMP) and `/PieceInfo` entries.
 - **Instant Sample Workspace:** Includes a built-in local sample PDF and slide generator so you can test merging, splitting, and metadata inspection with a single click.
 
 ---
@@ -131,7 +131,7 @@ paperflow/
 ## Security & Privacy Considerations
 
 - **No Network Transmission:** All document parsing and generation happen inside browser memory (`Uint8Array`). No files are uploaded to any backend server.
-- **Metadata Stripping Scope:** The metadata sanitizer clears standard PDF document information dictionary fields (`Title`, `Author`, `Subject`, `Creator`). It does not redact visible text inside page streams.
+- **Metadata Stripping Scope & Limitations:** Clicking **Strip All Metadata & Download** removes the PDF Document Information Dictionary (`/Info` fields: `Title`, `Author`, `Subject`, `Keywords`, `Creator`, `Producer`, `CreationDate`, `ModDate`, and custom `/Info` keys) as well as document-level and page-level `/Metadata` (XMP XML packet) and `/PieceInfo` streams while preserving valid PDF structure. It does **not** redact visible or hidden text inside page content streams, embedded font names, interactive form field values, annotations, or EXIF bytes inside embedded raster images.
 
 ---
 

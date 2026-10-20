@@ -71,6 +71,7 @@ export function App() {
 
   // 3. Image to PDF State
   const [imageFiles, setImageFiles] = useState<LoadedImageFile[]>([]);
+  const imageFilesRef = useRef<LoadedImageFile[]>([]);
   const [pageSize, setPageSize] = useState<'A4' | 'LETTER' | 'FIT'>('A4');
   const [orientation, setOrientation] = useState<'PORTRAIT' | 'LANDSCAPE'>('PORTRAIT');
   const [margin, setMargin] = useState<number>(36);
@@ -82,8 +83,23 @@ export function App() {
   const [editTitle, setEditTitle] = useState('');
   const [editAuthor, setEditAuthor] = useState('');
   const [editSubject, setEditSubject] = useState('');
+  const [editKeywords, setEditKeywords] = useState('');
   const [editCreator, setEditCreator] = useState('');
   const inspectInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    imageFilesRef.current = imageFiles;
+  }, [imageFiles]);
+
+  useEffect(() => {
+    return () => {
+      for (const img of imageFilesRef.current) {
+        if (img.previewUrl) {
+          URL.revokeObjectURL(img.previewUrl);
+        }
+      }
+    };
+  }, []);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -167,6 +183,7 @@ export function App() {
       setEditTitle(info3.title);
       setEditAuthor(info3.author);
       setEditSubject(info3.subject);
+      setEditKeywords(info3.keywords);
       setEditCreator(info3.creator);
 
       setStatusMessage({
@@ -356,6 +373,39 @@ export function App() {
   };
 
   // --- IMAGE TO PDF HANDLERS ---
+  const revokeUnusedPreviewUrls = (
+    removedItems: LoadedImageFile[],
+    retainedItems: LoadedImageFile[] = []
+  ) => {
+    const activeUrls = new Set(retainedItems.map((item) => item.previewUrl));
+    for (const removed of removedItems) {
+      if (removed.previewUrl && !activeUrls.has(removed.previewUrl)) {
+        URL.revokeObjectURL(removed.previewUrl);
+        activeUrls.add(removed.previewUrl);
+      }
+    }
+  };
+
+  const handleRemoveImage = (id: string) => {
+    setImageFiles((prev) => {
+      const removed = prev.filter((item) => item.id === id);
+      const retained = prev.filter((item) => item.id !== id);
+      revokeUnusedPreviewUrls(removed, retained);
+      return retained;
+    });
+  };
+
+  const handleClearImages = () => {
+    setImageFiles((prev) => {
+      revokeUnusedPreviewUrls(prev, []);
+      return [];
+    });
+    setStatusMessage({
+      type: 'info',
+      text: 'Cleared queued images and released preview memory.',
+    });
+  };
+
   const handleAddImages = async (fileList: FileList | null) => {
     if (!fileList || fileList.length === 0) return;
     setIsProcessing(true);
@@ -387,6 +437,7 @@ export function App() {
         text: `Added ${added.length} image${added.length > 1 ? 's' : ''} ready for PDF conversion.`,
       });
     } catch (err) {
+      revokeUnusedPreviewUrls(added, imageFilesRef.current);
       setStatusMessage({
         type: 'error',
         text: err instanceof Error ? err.message : 'Failed to load image.',
@@ -437,7 +488,7 @@ export function App() {
       const blob1 = new Blob([png1.buffer as ArrayBuffer], { type: 'image/png' });
       const blob2 = new Blob([png2.buffer as ArrayBuffer], { type: 'image/png' });
 
-      setImageFiles([
+      const nextImages: LoadedImageFile[] = [
         {
           id: 'sample-img-1',
           name: 'System-Topology-Slide-01.png',
@@ -454,7 +505,12 @@ export function App() {
           mimeType: 'image/png',
           previewUrl: URL.createObjectURL(blob2),
         },
-      ]);
+      ];
+
+      setImageFiles((prev) => {
+        revokeUnusedPreviewUrls(prev, nextImages);
+        return nextImages;
+      });
       setStatusMessage({
         type: 'success',
         text: 'Generated 2 sample PNG slides locally. Click "Build PDF from Images" to export!',
@@ -514,6 +570,7 @@ export function App() {
       setEditTitle(info.title);
       setEditAuthor(info.author);
       setEditSubject(info.subject);
+      setEditKeywords(info.keywords);
       setEditCreator(info.creator);
       setStatusMessage({
         type: 'info',
@@ -537,11 +594,12 @@ export function App() {
       const updatedBytes = await updatePdfMetadata(
         inspectFile.bytes,
         stripAll
-          ? { title: '', author: '', subject: '', creator: '' }
+          ? { stripAll: true }
           : {
               title: editTitle,
               author: editAuthor,
               subject: editSubject,
+              keywords: editKeywords,
               creator: editCreator,
             }
       );
@@ -556,6 +614,7 @@ export function App() {
         setEditTitle('');
         setEditAuthor('');
         setEditSubject('');
+        setEditKeywords('');
         setEditCreator('');
       }
       const baseName = inspectFile.name.replace(/\.pdf$/i, '');
@@ -566,7 +625,7 @@ export function App() {
       setStatusMessage({
         type: 'success',
         text: stripAll
-          ? 'Cleared identifying PDF metadata fields and downloaded sanitized PDF.'
+          ? 'Removed PDF /Info dictionary fields and XMP/PieceInfo catalog streams, and downloaded sanitized PDF.'
           : 'Saved updated document metadata and downloaded updated PDF.',
       });
     } catch (err) {
@@ -1104,6 +1163,16 @@ export function App() {
                   <Upload className="w-4 h-4 text-terracotta-600" />
                   Add PNG / JPEG
                 </button>
+                {imageFiles.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={handleClearImages}
+                    className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-semibold bg-white border border-red-200 hover:bg-red-50 text-red-700 cursor-pointer"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    Clear Images
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={handleConvertImages}
@@ -1215,9 +1284,7 @@ export function App() {
                       </div>
                       <button
                         type="button"
-                        onClick={() =>
-                          setImageFiles((prev) => prev.filter((item) => item.id !== img.id))
-                        }
+                        onClick={() => handleRemoveImage(img.id)}
                         aria-label={`Remove ${img.name}`}
                         className="p-1.5 rounded hover:bg-red-50 text-red-600 cursor-pointer"
                       >
@@ -1314,7 +1381,19 @@ export function App() {
                     <div className="flex justify-between py-1 border-b border-paper-100">
                       <dt className="text-stone-500">PDF Producer</dt>
                       <dd className="font-mono text-xs text-stone-700 truncate max-w-[220px]">
-                        {metaInfo.producer || 'None specified'}
+                        {metaInfo.producer || 'None'}
+                      </dd>
+                    </div>
+                    <div className="flex justify-between py-1 border-b border-paper-100">
+                      <dt className="text-stone-500">Keywords</dt>
+                      <dd className="font-mono text-xs text-stone-700 truncate max-w-[220px]">
+                        {metaInfo.keywords || 'None'}
+                      </dd>
+                    </div>
+                    <div className="flex justify-between py-1 border-b border-paper-100">
+                      <dt className="text-stone-500">XMP Metadata Stream</dt>
+                      <dd className="font-mono text-xs text-stone-700">
+                        {metaInfo.hasXmpMetadata ? 'Present' : 'None'}
                       </dd>
                     </div>
                     <div className="flex justify-between py-1">
@@ -1395,7 +1474,25 @@ export function App() {
                         placeholder="Creator Tool"
                       />
                     </div>
+                    <div className="sm:col-span-2">
+                      <label htmlFor="meta-keywords" className="block text-xs font-semibold uppercase font-mono text-stone-600 mb-1">
+                        Keywords (comma-separated)
+                      </label>
+                      <input
+                        id="meta-keywords"
+                        type="text"
+                        value={editKeywords}
+                        onChange={(e) => setEditKeywords(e.target.value)}
+                        className="w-full px-3 py-2 rounded-lg border border-paper-300 bg-paper-50 text-sm"
+                        placeholder="e.g. architecture, q3, internal"
+                      />
+                    </div>
                   </div>
+
+                  <p className="text-xs text-stone-600 bg-paper-50 border border-paper-200 rounded-lg p-3 leading-relaxed">
+                    <strong className="text-paper-900">Sanitization Scope:</strong>{' '}
+                    &ldquo;Strip All Metadata&rdquo; removes the PDF Document Information Dictionary (<code className="font-mono">/Info</code> fields: Title, Author, Subject, Keywords, Creator, Producer, CreationDate, ModDate) and catalog/page <code className="font-mono">/Metadata</code> (XMP) and <code className="font-mono">/PieceInfo</code> entries. It does not redact visible text inside page content streams, embedded font names, interactive form field values, or EXIF bytes embedded inside raster images.
+                  </p>
 
                   <div className="pt-2 flex justify-end">
                     <button

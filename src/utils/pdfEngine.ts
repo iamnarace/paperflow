@@ -1,4 +1,12 @@
-import { PDFDocument, StandardFonts, rgb, degrees } from 'pdf-lib';
+import {
+  PDFDocument,
+  PDFName,
+  PDFRef,
+  PDFDict,
+  StandardFonts,
+  rgb,
+  degrees,
+} from 'pdf-lib';
 
 export interface PageConfig {
   pageNumber: number; // 1-based original page index
@@ -13,10 +21,12 @@ export interface PdfMetadataInfo {
   title: string;
   author: string;
   subject: string;
+  keywords: string;
   creator: string;
   producer: string;
   creationDate: string;
   modificationDate: string;
+  hasXmpMetadata: boolean;
   pages: PageConfig[];
 }
 
@@ -117,16 +127,19 @@ export async function inspectPdfBuffer(buffer: Uint8Array): Promise<PdfMetadataI
 
   const creationDate = doc.getCreationDate();
   const modDate = doc.getModificationDate();
+  const hasXmpMetadata = Boolean(doc.catalog.get(PDFName.of('Metadata')));
 
   return {
     pageCount,
     title: doc.getTitle() ?? '',
     author: doc.getAuthor() ?? '',
     subject: doc.getSubject() ?? '',
+    keywords: doc.getKeywords() ?? '',
     creator: doc.getCreator() ?? '',
     producer: doc.getProducer() ?? '',
-    creationDate: creationDate ? creationDate.toISOString().slice(0, 10) : 'Unknown',
-    modificationDate: modDate ? modDate.toISOString().slice(0, 10) : 'Unknown',
+    creationDate: creationDate ? creationDate.toISOString().slice(0, 10) : 'None',
+    modificationDate: modDate ? modDate.toISOString().slice(0, 10) : 'None',
+    hasXmpMetadata,
     pages,
   };
 }
@@ -182,7 +195,62 @@ export async function organizePdfPages(
 }
 
 /**
- * Updates metadata fields in a PDF buffer and returns the updated PDF bytes.
+ * Sanitizes standard PDF document metadata and XMP/PieceInfo catalog streams.
+ *
+ * Scope & Limitations:
+ * - Removes all keys from the PDF Document Information Dictionary (/Info), including
+ *   Title, Author, Subject, Keywords, Creator, Producer, CreationDate, ModDate, and custom keys.
+ * - Removes document-level and page-level /Metadata (XMP XML streams) and /PieceInfo dictionaries.
+ * - Preserves page content streams, fonts, images, form fields, and document structure intact.
+ *   Note: Identifying text or EXIF tags embedded inside page content or raster images are not modified.
+ */
+export async function stripPdfMetadata(sourceBuffer: Uint8Array): Promise<Uint8Array> {
+  const doc = await PDFDocument.load(sourceBuffer, { updateMetadata: false });
+
+  // 1. Clear and detach the Document Information Dictionary (/Info)
+  const infoRef = doc.context.trailerInfo.Info;
+  if (infoRef) {
+    const infoObj = doc.context.lookup(infoRef);
+    if (infoObj instanceof PDFDict) {
+      for (const key of infoObj.keys()) {
+        infoObj.delete(key);
+      }
+    }
+    if (infoRef instanceof PDFRef) {
+      doc.context.delete(infoRef);
+    }
+    delete doc.context.trailerInfo.Info;
+  }
+
+  // 2. Remove catalog-level /Metadata (XMP packet) and /PieceInfo dictionaries
+  const catalogKeysToRemove = ['Metadata', 'PieceInfo'];
+  for (const keyName of catalogKeysToRemove) {
+    const pdfName = PDFName.of(keyName);
+    const ref = doc.catalog.get(pdfName);
+    if (ref instanceof PDFRef) {
+      doc.context.delete(ref);
+    }
+    doc.catalog.delete(pdfName);
+  }
+
+  // 3. Remove page-level /Metadata and /PieceInfo entries
+  for (const page of doc.getPages()) {
+    for (const keyName of catalogKeysToRemove) {
+      const pdfName = PDFName.of(keyName);
+      const ref = page.node.get(pdfName);
+      if (ref instanceof PDFRef) {
+        doc.context.delete(ref);
+      }
+      page.node.delete(pdfName);
+    }
+  }
+
+  return await doc.save();
+}
+
+/**
+ * Updates metadata fields in a PDF buffer (or strips all metadata when `stripAll` is true)
+ * and returns the updated PDF bytes.
  */
 export async function updatePdfMetadata(
   sourceBuffer: Uint8Array,
@@ -190,13 +258,35 @@ export async function updatePdfMetadata(
     title?: string;
     author?: string;
     subject?: string;
+    keywords?: string | string[];
     creator?: string;
+    stripAll?: boolean;
   }
 ): Promise<Uint8Array> {
-  const doc = await PDFDocument.load(sourceBuffer);
+  if (metadata.stripAll) {
+    return await stripPdfMetadata(sourceBuffer);
+  }
+
+  const doc = await PDFDocument.load(sourceBuffer, { updateMetadata: false });
   if (metadata.title !== undefined) doc.setTitle(metadata.title);
   if (metadata.author !== undefined) doc.setAuthor(metadata.author);
   if (metadata.subject !== undefined) doc.setSubject(metadata.subject);
+  if (metadata.keywords !== undefined) {
+    const kwArray = Array.isArray(metadata.keywords)
+      ? metadata.keywords
+      : metadata.keywords
+          .split(',')
+          .map((k) => k.trim())
+          .filter(Boolean);
+    if (kwArray.length > 0) {
+      doc.setKeywords(kwArray);
+    } else if (doc.context.trailerInfo.Info) {
+      const infoObj = doc.context.lookup(doc.context.trailerInfo.Info);
+      if (infoObj instanceof PDFDict) {
+        infoObj.delete(PDFName.of('Keywords'));
+      }
+    }
+  }
   if (metadata.creator !== undefined) doc.setCreator(metadata.creator);
   doc.setModificationDate(new Date());
   return await doc.save();
@@ -297,6 +387,7 @@ export async function generateSamplePdf(
   doc.setTitle(title);
   doc.setAuthor(author);
   doc.setSubject('Sample Document Generated Locally by PaperFlow');
+  doc.setKeywords(['paperflow', 'local-sample', 'audit-fixture']);
   doc.setCreator('PaperFlow Workbench');
 
   const fontBold = await doc.embedFont(StandardFonts.HelveticaBold);
