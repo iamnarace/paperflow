@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/react';
-import { PDFDocument, PDFName } from 'pdf-lib';
+import { PDFDocument, PDFName, PDFDict, PDFString } from 'pdf-lib';
 import {
   formatBytes,
   parsePageRanges,
@@ -88,8 +88,8 @@ describe('PaperFlow PDF Engine Unit & Integration Tests', () => {
     expect(info.keywords).toContain('beta');
   });
 
-  it('strips all /Info metadata fields (including Keywords, Producer, Dates) and XMP /Metadata streams while preserving PDF validity', async () => {
-    // Build a representative PDF fixture with full /Info fields + embedded XMP packet + /PieceInfo
+  it('strips all /Info metadata fields (including Keywords, Producer, Dates, Custom keys) and XMP /Metadata streams across catalog, page, and object levels while preserving PDF validity and page content', async () => {
+    // Build a representative PDF fixture with full /Info fields + custom /Info key + catalog/page/object XMP packets + /PieceInfo
     const baseBytes = await generateSamplePdf('Confidential RFC', 'Jane Doe', 2);
     const doc = await PDFDocument.load(baseBytes);
     doc.setKeywords(['secret-project', 'internal-audit']);
@@ -97,15 +97,49 @@ describe('PaperFlow PDF Engine Unit & Integration Tests', () => {
     doc.setCreationDate(new Date('2025-05-10T12:00:00Z'));
     doc.setModificationDate(new Date('2025-06-15T15:30:00Z'));
 
-    const xmpXml =
-      '<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?><x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description dc:creator="XMP-Secret-Author-Tag"/></rdf:RDF></x:xmpmeta><?xpacket end="w"?>';
-    const xmpStream = doc.context.flateStream(xmpXml, {
+    // Add a custom non-standard /Info key
+    if (doc.context.trailerInfo.Info) {
+      const infoDict = doc.context.lookup(doc.context.trailerInfo.Info);
+      if (infoDict instanceof PDFDict) {
+        infoDict.set(PDFName.of('CustomCompanyID'), PDFString.of('ACME-SECRET-998877'));
+      }
+    }
+
+    // 1. Catalog-level XMP stream
+    const catalogXmpXml =
+      '<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?><x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description dc:creator="XMP-Catalog-Secret-Author"/></rdf:RDF></x:xmpmeta><?xpacket end="w"?>';
+    const catalogXmpStream = doc.context.flateStream(catalogXmpXml, {
       Type: 'Metadata',
       Subtype: 'XML',
     });
-    const xmpRef = doc.context.register(xmpStream);
-    doc.catalog.set(PDFName.of('Metadata'), xmpRef);
-    doc.catalog.set(PDFName.of('PieceInfo'), doc.context.obj({ PrivateApp: 'Secret' }));
+    doc.catalog.set(PDFName.of('Metadata'), doc.context.register(catalogXmpStream));
+    doc.catalog.set(PDFName.of('PieceInfo'), doc.context.obj({ PrivateCatalogApp: 'SecretCatalogTool' }));
+
+    // 2. Page-level XMP stream & PieceInfo on Page 1
+    const pageXmpXml =
+      '<?xpacket begin="" id="page1"?><x:xmpmeta><rdf:Description dc:description="Page-Level-XMP-Secret"/></x:xmpmeta><?xpacket end="w"?>';
+    const pageXmpStream = doc.context.flateStream(pageXmpXml, {
+      Type: 'Metadata',
+      Subtype: 'XML',
+    });
+    doc.getPage(0).node.set(PDFName.of('Metadata'), doc.context.register(pageXmpStream));
+    doc.getPage(0).node.set(PDFName.of('PieceInfo'), doc.context.obj({ PrivatePageApp: 'SecretPageTool' }));
+
+    // 3. Component-level XMP stream attached to an indirect object dictionary
+    const componentXmpXml =
+      '<?xpacket begin="" id="comp1"?><x:xmpmeta><rdf:Description dc:rights="Component-Level-XMP-Secret"/></x:xmpmeta><?xpacket end="w"?>';
+    const componentXmpRef = doc.context.register(
+      doc.context.flateStream(componentXmpXml, {
+        Type: 'Metadata',
+        Subtype: 'XML',
+      })
+    );
+    const customResourceDict = doc.context.obj({
+      Subtype: 'Form',
+      Metadata: componentXmpRef,
+      PieceInfo: { PrivateResource: 'SecretComponentTool' },
+    });
+    const customResourceRef = doc.context.register(customResourceDict);
 
     const fixtureBytes = await doc.save({ useObjectStreams: false });
     const beforeInfo = await inspectPdfBuffer(fixtureBytes);
@@ -122,6 +156,8 @@ describe('PaperFlow PDF Engine Unit & Integration Tests', () => {
     const afterInfo = await inspectPdfBuffer(strippedBytes);
 
     expect(afterInfo.pageCount).toBe(2);
+    expect(afterInfo.pages[0].width).toBe(beforeInfo.pages[0].width);
+    expect(afterInfo.pages[0].height).toBe(beforeInfo.pages[0].height);
     expect(afterInfo.title).toBe('');
     expect(afterInfo.author).toBe('');
     expect(afterInfo.subject).toBe('');
@@ -132,10 +168,67 @@ describe('PaperFlow PDF Engine Unit & Integration Tests', () => {
     expect(afterInfo.modificationDate).toBe('None');
     expect(afterInfo.hasXmpMetadata).toBe(false);
 
-    // Verify catalog /PieceInfo was also removed
+    // Verify catalog, page, and component /Metadata & /PieceInfo were removed and page content streams remain intact
     const reloadedDoc = await PDFDocument.load(strippedBytes, { updateMetadata: false });
+    expect(reloadedDoc.context.trailerInfo.Info).toBeUndefined();
     expect(reloadedDoc.catalog.get(PDFName.of('Metadata'))).toBeUndefined();
     expect(reloadedDoc.catalog.get(PDFName.of('PieceInfo'))).toBeUndefined();
+    expect(reloadedDoc.getPage(0).node.get(PDFName.of('Metadata'))).toBeUndefined();
+    expect(reloadedDoc.getPage(0).node.get(PDFName.of('PieceInfo'))).toBeUndefined();
+    expect(reloadedDoc.getPage(0).node.Contents()).toBeDefined();
+    expect(reloadedDoc.getPage(1).node.Contents()).toBeDefined();
+
+    const reloadedResource = reloadedDoc.context.lookup(customResourceRef);
+    if (reloadedResource instanceof PDFDict) {
+      expect(reloadedResource.get(PDFName.of('Metadata'))).toBeUndefined();
+      expect(reloadedResource.get(PDFName.of('PieceInfo'))).toBeUndefined();
+    }
+
+    // Verify raw serialized output bytes do not contain the stripped /Info or XMP metadata strings
+    const rawOutputText = new TextDecoder('latin1').decode(strippedBytes);
+    expect(rawOutputText.startsWith('%PDF-')).toBe(true);
+    expect(rawOutputText).not.toContain('secret-project');
+    expect(rawOutputText).not.toContain('Custom Producer v9.9');
+    expect(rawOutputText).not.toContain('ACME-SECRET-998877');
+    expect(rawOutputText).not.toContain('XMP-Catalog-Secret-Author');
+    expect(rawOutputText).not.toContain('Page-Level-XMP-Secret');
+    expect(rawOutputText).not.toContain('Component-Level-XMP-Secret');
+    expect(rawOutputText).not.toContain('SecretCatalogTool');
+    expect(rawOutputText).not.toContain('SecretPageTool');
+    expect(rawOutputText).not.toContain('SecretComponentTool');
+  });
+
+  it('detects page-level XMP metadata even when catalog /Metadata is absent', async () => {
+    const doc = await PDFDocument.create();
+    const page = doc.addPage([400, 400]);
+    const pageXmp = doc.context.flateStream('<x:xmpmeta>page-only</x:xmpmeta>', {
+      Type: 'Metadata',
+      Subtype: 'XML',
+    });
+    page.node.set(PDFName.of('Metadata'), doc.context.register(pageXmp));
+    const bytes = await doc.save();
+
+    const inspectedBefore = await inspectPdfBuffer(bytes);
+    expect(inspectedBefore.hasXmpMetadata).toBe(true);
+
+    const sanitized = await stripPdfMetadata(bytes);
+    const inspectedAfter = await inspectPdfBuffer(sanitized);
+    expect(inspectedAfter.hasXmpMetadata).toBe(false);
+  });
+
+  it('fails safely with descriptive errors on empty, non-PDF, or corrupted byte buffers', async () => {
+    const emptyBytes = new Uint8Array(0);
+    await expect(inspectPdfBuffer(emptyBytes)).rejects.toThrow(/empty|too small/i);
+    await expect(stripPdfMetadata(emptyBytes)).rejects.toThrow(/empty|too small/i);
+
+    const htmlBytes = new TextEncoder().encode('<!DOCTYPE html><html><body>Not a PDF</body></html>');
+    await expect(inspectPdfBuffer(htmlBytes)).rejects.toThrow(/missing %PDF-/i);
+    await expect(stripPdfMetadata(htmlBytes)).rejects.toThrow(/missing %PDF-/i);
+    await expect(mergePdfBuffers([htmlBytes])).rejects.toThrow(/missing %PDF-/i);
+
+    const corruptedPdfBytes = new TextEncoder().encode('%PDF-1.7\n1 0 obj\n<< /Type /Catalog /Pages CORRUPTED_STREAM');
+    await expect(inspectPdfBuffer(corruptedPdfBytes)).rejects.toThrow();
+    await expect(stripPdfMetadata(corruptedPdfBytes)).rejects.toThrow();
   });
 
   it('releases object URLs when images are removed or cleared without revoking URLs still in use', async () => {
